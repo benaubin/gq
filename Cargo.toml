@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "gq",
+    "gq_internals",
+    "gq_macros"
+]
