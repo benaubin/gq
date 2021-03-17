@@ -58,6 +58,34 @@ pub fn derive_enum_value(input: TokenStream) -> TokenStream {
     let variant_idents: Vec<_> = data.variants.iter().map(|var| var.ident.clone()).collect();
     let variant_names: Vec<_> = data.variants.iter().map(|var| var.ident.to_string().TO_SHOUTY_SNEK_CASE()).collect();
     let variant_descriptions = data.variants.iter().map(|var| option_literal(parse_doc_string(&var.attrs)));
+    let variant_deprecated_reasons = data
+        .variants
+        .iter()
+        .map(|var| {
+            let deprecated = var.attrs.iter().find(|attr| {
+                attr.path
+                    .get_ident()
+                    .map(|i| i.to_string() == "deprecated")
+                    .unwrap_or(false)
+            })?;
+
+            let note = match deprecated.parse_meta().unwrap() {
+                syn::Meta::List(meta) => meta.nested.iter().find_map(|meta| match meta {
+                    syn::NestedMeta::Meta(syn::Meta::NameValue(meta))
+                        if meta.path.get_ident().unwrap().to_string() == "note" =>
+                    {
+                        Some(meta.lit.to_token_stream())
+                    }
+                    _ => None,
+                }),
+                syn::Meta::Path(_) => None,
+                _ => panic!(),
+            };
+
+            let note = note.unwrap_or(quote!("Deprecated"));
+            Some(note)
+        })
+        .map(option_literal);
 
     // Build the output, possibly using quasi-quotation
     let expanded = quote! {
@@ -89,6 +117,13 @@ pub fn derive_enum_value(input: TokenStream) -> TokenStream {
             }
 
             fn from_value(value: &str) -> Option<Self> {
+            fn deprecated(&self) -> Option<&'static str> {
+                match self {
+                    #(
+                        Self::#variant_idents => #variant_deprecated_reasons,
+                    )*
+                }
+            }
                 match value {
                     #(
                         #variant_names => Some(Self::#variant_idents),

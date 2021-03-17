@@ -10,6 +10,7 @@ pub trait EnumValue: Sized + 'static {
     fn value(&self) -> &str;
     fn from_value(value: &str) -> Option<Self>;
 
+    fn deprecated(&self) -> Option<&'static str>;
     fn description(&self) -> Option<&'static str> { None }
     fn directives(&self) -> Option<DirectivesConst<'_>> { None }
 }

@@ -7,7 +7,9 @@ pub use gq_macros::EnumValue;
 enum TestEnum {
     Foobar,
     ///  A test value
-    TestValue
+    TestValue,
+    #[deprecated(since="old", note="Foobar")]
+    OldValue
 }
 
 
@@ -19,14 +21,17 @@ mod tests {
     use gq_internals::TypeIdl;
 
     #[test]
+    #[allow(deprecated)]
     fn it_works() {
         assert_eq!(TestEnum::NAME, "TestEnum");
         assert_eq!(TestEnum::DESCRIPTION, Some("A test enum"));
-        assert_eq!(TestEnum::VALUES, &[ TestEnum::Foobar, TestEnum::TestValue ]);
+        assert_eq!(TestEnum::VALUES, &[ TestEnum::Foobar, TestEnum::TestValue, TestEnum::OldValue ]);
         assert_eq!(TestEnum::Foobar.value(), "FOOBAR");
         assert_eq!(TestEnum::Foobar.description(), None);
         assert_eq!(TestEnum::TestValue.value(), "TEST_VALUE");
         assert_eq!(TestEnum::TestValue.description(), Some(" A test value"));
+        assert_eq!(TestEnum::TestValue.deprecated(), None);
+        assert_eq!(TestEnum::OldValue.deprecated(), Some("Foobar"));
     }
 
     #[test]
@@ -43,6 +48,7 @@ enum TestEnum {
    A test value
   """
   TEST_VALUE
+  OLD_VALUE
 }
 "#);
     }
