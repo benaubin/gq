@@ -1,9 +1,8 @@
 //! Powerful for avoiding N+1 queries with async/await, based on the DataLoader pattern.
 //!
-//! data_loader batches loads which occur during a single "poll", such as because of a select.
+//! data_loader batches loads which occur during a single "poll", without requiring an artificial delay.
 //!
 //! Design inspired by https://github.com/exAspArk/batch-loader and https://github.com/graphql/dataloader
-//!
 //!
 //! # Usage
 //!
