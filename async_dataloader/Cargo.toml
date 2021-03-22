@@ -3,6 +3,9 @@ name = "async_dataloader"
 version = "0.1.0"
 authors = ["Ben Aubin <ben@benaubin.com>"]
 edition = "2018"
+repository = "https://github.com/benaubin/gq/tree/main/async_dataloader"
+license = "MIT"
+description = "Powerful tool for avoiding N+1 queries using async/await, based on the DataLoader pattern."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
