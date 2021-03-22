@@ -210,7 +210,7 @@ impl<Input: 'static, Output: ?Sized> BatchLoad<Input, Output> {
     ///
     /// Rust futures are lazy, meaning they have do nothing until polled.
     /// Calling this method will cause the load to be added to the next batch,
-    /// even if it the future is not polled until later.
+    /// even if the future is not polled until later.
     pub fn schedule(&mut self) {
         if let Self::New { .. } = self {
             let (tx, rx) = futures::channel::oneshot::channel();
