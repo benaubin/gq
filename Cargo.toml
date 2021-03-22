@@ -3,5 +3,6 @@
 members = [
     "gq",
     "gq_internals",
-    "gq_macros"
+    "gq_macros",
+    "async_dataloader"
 ]
