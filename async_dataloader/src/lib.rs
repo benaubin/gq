@@ -24,13 +24,21 @@
 //! # })
 //! ```
 
+use std::{
+    any::{Any, TypeId},
+    cell::{RefCell, RefMut},
+    collections::HashMap,
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    rc::Rc,
+    task::Poll,
+    unreachable,
+};
 
-use std::{any::{Any, TypeId}, cell::{RefCell, RefMut}, collections::{HashMap}, future::Future, marker::PhantomData, pin::Pin, rc::Rc, task::{Poll}, unreachable};
-
-use futures::{FutureExt};
 use futures::channel::oneshot;
+use futures::FutureExt;
 use slab::Slab;
-
 
 /// Allows using batch loaders from within the passed future.
 pub fn batched<F: Future>(fut: F) -> Batched<F> {
@@ -40,8 +48,8 @@ pub fn batched<F: Future>(fut: F) -> Batched<F> {
         ctx: Rc::new(RefCell::new(BatchContext {
             accumulating: HashMap::new(),
             postpone_loading: 0,
-            user_ctx: HashMap::new()
-        }))
+            user_ctx: HashMap::new(),
+        })),
     }
 }
 
@@ -51,14 +59,17 @@ type ResultSender = futures::channel::oneshot::Sender<Box<dyn Any>>;
 pub mod __internal {
     use std::{future::Future, pin::Pin, task::Poll};
 
-    use super::{ResultSender};
+    use super::ResultSender;
 
     pub struct LoadBatch<Outputs: Iterator, F: Future<Output = Outputs>> {
         pub fut: F,
-        pub result_senders: Vec<ResultSender>
+        pub result_senders: Vec<ResultSender>,
     }
 
-    impl<Outputs: Iterator, F: Future<Output = Outputs>> Future for LoadBatch<Outputs, F> where Outputs::Item: 'static {
+    impl<Outputs: Iterator, F: Future<Output = Outputs>> Future for LoadBatch<Outputs, F>
+    where
+        Outputs::Item: 'static,
+    {
         type Output = ();
 
         fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
@@ -73,7 +84,9 @@ pub mod __internal {
             };
 
             // check if no one cares for the results of this batch
-            if senders.iter().all(|res| res.is_canceled() ) { return Poll::Ready(()) }
+            if senders.iter().all(|res| res.is_canceled()) {
+                return Poll::Ready(());
+            }
 
             match fut.poll(cx) {
                 Poll::Ready(outputs) => {
@@ -82,7 +95,7 @@ pub mod __internal {
                     }
                     Poll::Ready(())
                 }
-                Poll::Pending => Poll::Pending
+                Poll::Pending => Poll::Pending,
             }
         }
     }
@@ -128,7 +141,7 @@ macro_rules! def_batch_loader {
     };
 }
 
-type LoadFn = fn ( Batch ) -> Pin<Box<dyn Future<Output = ()>>>;
+type LoadFn = fn(Batch) -> Pin<Box<dyn Future<Output = ()>>>;
 
 /// Context provided when executing within a batched() future.
 pub struct BatchContext {
@@ -136,7 +149,7 @@ pub struct BatchContext {
 
     postpone_loading: usize,
 
-    user_ctx: HashMap<TypeId, Box<dyn Any>>
+    user_ctx: HashMap<TypeId, Box<dyn Any>>,
 }
 
 impl BatchContext {
@@ -146,11 +159,15 @@ impl BatchContext {
     }
     /// Get context of a given type. Exactly one value per type may be stored.
     pub fn get_ctx<T: Any>(&self) -> Option<&T> {
-        self.user_ctx.get(&TypeId::of::<T>()).map(|a| a.downcast_ref().unwrap())
+        self.user_ctx
+            .get(&TypeId::of::<T>())
+            .map(|a| a.downcast_ref().unwrap())
     }
     /// Get context of a given type. Exactly one value per type may be stored.
     pub fn mut_ctx<'a, T: Any>(&'a mut self) -> Option<&'a mut T> {
-        self.user_ctx.get_mut(&TypeId::of::<T>()).map(|a| a.downcast_mut().unwrap())
+        self.user_ctx
+            .get_mut(&TypeId::of::<T>())
+            .map(|a| a.downcast_mut().unwrap())
     }
 }
 
@@ -162,12 +179,15 @@ thread_local! {
 #[doc(hidden)]
 pub struct Batch {
     pub inputs: Vec<Box<dyn Any>>,
-    pub result_senders: Vec<ResultSender>
+    pub result_senders: Vec<ResultSender>,
 }
 
 impl Batch {
     fn empty() -> Self {
-        Batch { inputs: vec![], result_senders: vec![] }
+        Batch {
+            inputs: vec![],
+            result_senders: vec![],
+        }
     }
     fn push(&mut self, input: Box<dyn Any>, result: ResultSender) {
         self.inputs.push(input);
@@ -180,9 +200,9 @@ pub enum BatchLoad<Input, Output: ?Sized> {
     New {
         load_fn: LoadFn,
         input: Box<Input>,
-        phantom: PhantomData<Box<Output>>
+        phantom: PhantomData<Box<Output>>,
     },
-    Pending(oneshot::Receiver<Box<dyn Any>>)
+    Pending(oneshot::Receiver<Box<dyn Any>>),
 }
 
 impl<Input: 'static, Output: ?Sized> BatchLoad<Input, Output> {
@@ -192,7 +212,7 @@ impl<Input: 'static, Output: ?Sized> BatchLoad<Input, Output> {
     /// Calling this method will cause the load to be added to the next batch,
     /// even if it the future is not polled until later.
     pub fn schedule(&mut self) {
-        if let Self::New {..} = self {
+        if let Self::New { .. } = self {
             let (tx, rx) = futures::channel::oneshot::channel();
 
             match std::mem::replace(self, BatchLoad::Pending(rx)) {
@@ -202,8 +222,8 @@ impl<Input: 'static, Output: ?Sized> BatchLoad<Input, Output> {
 
                         batch.push(input, tx);
                     });
-                },
-                _ => unreachable!()
+                }
+                _ => unreachable!(),
             };
         }
     }
@@ -217,17 +237,21 @@ impl<Input: 'static, Output: 'static> Future for BatchLoad<Input, Output> {
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        if let Self::New {..} = this {
+        if let Self::New { .. } = this {
             this.schedule();
         }
 
-        let rx = if let Self::Pending(rx) = this { rx } else { unreachable!() };
+        let rx = if let Self::Pending(rx) = this {
+            rx
+        } else {
+            unreachable!()
+        };
 
-        let poll = rx.poll_unpin(cx).map(|res| res.expect("Batch loading context was cancelled"));
+        let poll = rx
+            .poll_unpin(cx)
+            .map(|res| res.expect("Batch loading context was cancelled"));
 
-        poll.map(|val| {
-            val.downcast().unwrap()
-        })
+        poll.map(|val| val.downcast().unwrap())
     }
 }
 
@@ -237,7 +261,7 @@ pub struct Batched<F: Future> {
 
     ctx: Rc<RefCell<BatchContext>>,
 
-    batch_futures: Slab<Pin<Box<dyn Future<Output = ()>>>>
+    batch_futures: Slab<Pin<Box<dyn Future<Output = ()>>>>,
 }
 
 impl<F: Future> Batched<F> {
@@ -250,15 +274,11 @@ impl<F: Future> Batched<F> {
 /// Provides the batch context through thread local storage
 #[inline]
 fn provide_batch_ctx<T>(ctx: Rc<RefCell<BatchContext>>, cb: impl FnOnce() -> T) -> T {
-    let existing_ctx = BATCH_CONTEXT.with(|cell| {
-        cell.replace(Some(ctx))
-    });
+    let existing_ctx = BATCH_CONTEXT.with(|cell| cell.replace(Some(ctx)));
 
     let val = (cb)();
 
-    BATCH_CONTEXT.with(|cell| {
-        cell.replace(existing_ctx)
-    });
+    BATCH_CONTEXT.with(|cell| cell.replace(existing_ctx));
 
     val
 }
@@ -267,15 +287,16 @@ fn provide_batch_ctx<T>(ctx: Rc<RefCell<BatchContext>>, cb: impl FnOnce() -> T) 
 pub fn with_batch_ctx<T>(cb: impl FnOnce(&mut BatchContext) -> T) -> T {
     BATCH_CONTEXT.with(|cell| {
         let ctx = cell.borrow();
-        let ctx = ctx.as_ref().expect("Tried to call a batched loader outside of a batching context.");
+        let ctx = ctx
+            .as_ref()
+            .expect("Tried to call a batched loader outside of a batching context.");
         let mut ctx = (&*ctx).borrow_mut();
         cb(&mut ctx)
     })
 }
 
-
 #[doc(hidden)]
-pub struct DelayGuard<'a>( PhantomData<Rc<RefCell<&'a ()>>> );
+pub struct DelayGuard<'a>(PhantomData<Rc<RefCell<&'a ()>>>);
 
 impl<'a> Drop for DelayGuard<'a> {
     fn drop(&mut self) {
@@ -343,9 +364,9 @@ impl<'a> Drop for DelayGuard<'a> {
 ///     two.schedule();
 ///     yield_now().await;
 ///     drop(guard);
-/// 
+///
 ///     let three = three.await;
-/// 
+///
 ///     assert_eq!(three, Box::new((vec![2, 3], "3".to_owned())));
 /// }).await;
 /// # });
@@ -371,7 +392,10 @@ impl<F: Future> Drop for Batched<F> {
 impl<F: Future> Future for Batched<F> {
     type Output = F::Output;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         let fut;
         let batch_futures;
         let ctx;
@@ -388,11 +412,11 @@ impl<F: Future> Future for Batched<F> {
             let poll = fut.poll(cx);
 
             let mut ready_futures = vec![];
-            
+
             for (idx, batch_fut) in batch_futures.iter_mut() {
                 match batch_fut.as_mut().poll(cx) {
                     Poll::Ready(_) => ready_futures.push(idx),
-                    Poll::Pending => { }
+                    Poll::Pending => {}
                 }
             }
 
@@ -407,9 +431,13 @@ impl<F: Future> Future for Batched<F> {
             let batches = {
                 let mut ctx = (**ctx).borrow_mut();
 
-                if ctx.accumulating.is_empty() { break }
+                if ctx.accumulating.is_empty() {
+                    break;
+                }
 
-                if ctx.postpone_loading > 0 { break }
+                if ctx.postpone_loading > 0 {
+                    break;
+                }
 
                 std::mem::replace(&mut ctx.accumulating, HashMap::new())
             };
@@ -426,10 +454,8 @@ impl<F: Future> Future for Batched<F> {
         }
 
         match poll {
-            Poll::Ready(val) if batch_futures.is_empty() => {
-                Poll::Ready(val)
-            },
-            _ => Poll::Pending
+            Poll::Ready(val) if batch_futures.is_empty() => Poll::Ready(val),
+            _ => Poll::Pending,
         }
     }
 }
@@ -443,7 +469,10 @@ mod tests {
 
         impl std::future::Future for YieldNow {
             type Output = ();
-            fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
                 if self.yielded {
                     std::task::Poll::Ready(())
                 } else {
@@ -458,7 +487,7 @@ mod tests {
     }
 
     use super::{batched, def_batch_loader, delay_loading_batches};
-    use futures::{FutureExt};
+    use futures::FutureExt;
 
     def_batch_loader! {
         /// Hello there!
@@ -491,7 +520,8 @@ mod tests {
                         assert_eq!(ff, Box::new((vec![32, 54], "54".to_owned())));
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
 
@@ -499,19 +529,22 @@ mod tests {
     fn test_schedule() {
         futures::executor::block_on(async {
             batched(async {
-                assert_eq!(load_foobar_batched(12).await, Box::new((vec![12], "12".to_owned())));
+                assert_eq!(
+                    load_foobar_batched(12).await,
+                    Box::new((vec![12], "12".to_owned()))
+                );
 
                 let mut fifty_four = load_foobar_batched(54);
                 let thirty_two = load_foobar_batched(32);
-                
+
                 fifty_four.schedule();
 
                 assert_eq!(thirty_two.await, Box::new((vec![54, 32], "32".to_owned())));
                 assert_eq!(fifty_four.await, Box::new((vec![54, 32], "54".to_owned())));
-            }).await;
+            })
+            .await;
         });
     }
-
 
     #[test]
     fn test_ctx() {
@@ -535,10 +568,10 @@ mod tests {
             }
 
             let mut scope = batched(async {
-                assert_eq!( counter("hello").await, Box::new(("hello", 1)) );
-                assert_eq!( counter("hello there").await, Box::new(("hello there", 2)) );
+                assert_eq!(counter("hello").await, Box::new(("hello", 1)));
+                assert_eq!(counter("hello there").await, Box::new(("hello there", 2)));
             });
-            
+
             scope.ctx().set_ctx(Box::new(Count(0)));
 
             scope.await;
@@ -565,7 +598,10 @@ mod tests {
 
                 impl std::future::Future for PendingOnce {
                     type Output = ();
-                    fn poll(mut self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+                    fn poll(
+                        mut self: std::pin::Pin<&mut Self>,
+                        _: &mut std::task::Context<'_>,
+                    ) -> std::task::Poll<Self::Output> {
                         if self.is_ready {
                             std::task::Poll::Ready(())
                         } else {
@@ -576,7 +612,8 @@ mod tests {
                 }
 
                 let _ = delay_loading_batches();
-            }).await;
+            })
+            .await;
         });
     }
 }
