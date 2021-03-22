@@ -196,6 +196,8 @@ impl Batch {
 }
 
 /// Future returned by a batch loader
+///
+/// Should only be created by a batch loader using the def_batch_loader macro
 pub enum BatchLoad<Input, Output: ?Sized> {
     New {
         load_fn: LoadFn,
@@ -241,17 +243,16 @@ impl<Input: 'static, Output: 'static> Future for BatchLoad<Input, Output> {
             this.schedule();
         }
 
+        // after scheduling, we should be pending
         let rx = if let Self::Pending(rx) = this {
             rx
         } else {
             unreachable!()
         };
 
-        let poll = rx
-            .poll_unpin(cx)
-            .map(|res| res.expect("Batch loading context was cancelled"));
-
-        poll.map(|val| val.downcast().unwrap())
+        rx.poll_unpin(cx)
+            .map(|res| res.expect("Batch loading context finished"))
+            .map(|val| val.downcast().unwrap()) // convert to expected type (this should never fail because the batch loader should create this future)
     }
 }
 
@@ -400,6 +401,10 @@ impl<F: Future> Future for Batched<F> {
         let batch_futures;
         let ctx;
 
+        // SAFETY: we need to get pinned values out of self, but self may be !Unpin because of F.
+        //
+        // We immediately Pin the reference to fut to prevent moving fut.
+        // We can aquire mutable references to other values, as they are Unpin and can be safely moved.
         unsafe {
             let this = self.get_unchecked_mut();
 
@@ -409,19 +414,18 @@ impl<F: Future> Future for Batched<F> {
         };
 
         let poll = provide_batch_ctx(ctx.clone(), || {
+            // poll `fut` first (the wrapped future) - this should register the most recent waker to batch futures
             let poll = fut.poll(cx);
 
-            let mut ready_futures = vec![];
+            for idx in 0..batch_futures.capacity() {
+                let poll = match batch_futures.get_mut(idx) {
+                    Some(batch_fut) => batch_fut.as_mut().poll(cx),
+                    None => continue,
+                };
 
-            for (idx, batch_fut) in batch_futures.iter_mut() {
-                match batch_fut.as_mut().poll(cx) {
-                    Poll::Ready(_) => ready_futures.push(idx),
-                    Poll::Pending => {}
+                if let Poll::Ready(()) = poll {
+                    batch_futures.remove(idx);
                 }
-            }
-
-            for idx in ready_futures {
-                batch_futures.remove(idx);
             }
 
             poll
@@ -453,10 +457,7 @@ impl<F: Future> Future for Batched<F> {
             })
         }
 
-        match poll {
-            Poll::Ready(val) if batch_futures.is_empty() => Poll::Ready(val),
-            _ => Poll::Pending,
-        }
+        poll
     }
 }
 
