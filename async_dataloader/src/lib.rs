@@ -10,7 +10,7 @@
 //! use async_dataloader::{def_batch_loader, batched};
 //!
 //! def_batch_loader! {
-//!     pub async fn loader(inputs: u64) -> (String) {
+//!     pub async fn loader(inputs: u64) -> String {
 //!         inputs.map(|input| {
 //!              input.to_string()
 //!         })
