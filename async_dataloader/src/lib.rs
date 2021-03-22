@@ -140,12 +140,15 @@ pub struct BatchContext {
 }
 
 impl BatchContext {
+    /// Provide context of a given type. Exactly one value per type may be stored.
     pub fn set_ctx(&mut self, val: Box<dyn Any>) -> Option<Box<dyn Any>> {
         self.user_ctx.insert((*val).type_id(), val)
     }
+    /// Get context of a given type. Exactly one value per type may be stored.
     pub fn get_ctx<T: Any>(&self) -> Option<&T> {
         self.user_ctx.get(&TypeId::of::<T>()).map(|a| a.downcast_ref().unwrap())
     }
+    /// Get context of a given type. Exactly one value per type may be stored.
     pub fn mut_ctx<'a, T: Any>(&'a mut self) -> Option<&'a mut T> {
         self.user_ctx.get_mut(&TypeId::of::<T>()).map(|a| a.downcast_mut().unwrap())
     }
@@ -238,6 +241,7 @@ pub struct Batched<F: Future> {
 }
 
 impl<F: Future> Batched<F> {
+    /// Access the BatchContext from outside of async execution
     pub fn ctx<'a>(&'a mut self) -> RefMut<'a, BatchContext> {
         self.ctx.borrow_mut()
     }
@@ -259,7 +263,7 @@ fn provide_batch_ctx<T>(ctx: Rc<RefCell<BatchContext>>, cb: impl FnOnce() -> T) 
     val
 }
 
-// Retrieves the batch context from thread local storage
+/// Retrieves the batch context from thread local storage
 pub fn with_batch_ctx<T>(cb: impl FnOnce(&mut BatchContext) -> T) -> T {
     BATCH_CONTEXT.with(|cell| {
         let ctx = cell.borrow();
