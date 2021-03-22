@@ -195,16 +195,16 @@ impl<Input: 'static, Output: ?Sized> BatchLoad<Input, Output> {
         if let Self::New {..} = self {
             let (tx, rx) = futures::channel::oneshot::channel();
 
-            let (load_fn, input) = match std::mem::replace(self, BatchLoad::Pending(rx)) {
-                Self::New { load_fn, input, .. } => (load_fn, input),
+            match std::mem::replace(self, BatchLoad::Pending(rx)) {
+                Self::New { load_fn, input, .. } => {
+                    with_batch_ctx(|ctx| {
+                        let batch = ctx.accumulating.entry(load_fn).or_insert(Batch::empty());
+
+                        batch.push(input, tx);
+                    });
+                },
                 _ => unreachable!()
             };
-
-            with_batch_ctx(|ctx| {
-                let batch = ctx.accumulating.entry(load_fn).or_insert(Batch::empty());
-
-                batch.push(input, tx);
-            });
         }
     }
 }
