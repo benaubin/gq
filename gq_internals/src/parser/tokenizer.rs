@@ -1,4 +1,4 @@
-use std::borrow::{Cow};
+use std::borrow::Cow;
 
 use super::{ParserError, ParserErrorKind, Position, Token};
 
@@ -21,6 +21,17 @@ pub struct Tokenizer<'src> {
 }
 
 impl<'src> Tokenizer<'src> {
+    pub fn new(source: &'src str) -> Self {
+        Tokenizer {
+            source,
+            pos: Position {
+                idx: 0,
+                line: 1,
+                line_start_idx: 0,
+            },
+        }
+    }
+
     #[inline]
     fn peek_byte(&self) -> Option<u8> {
         self.source.as_bytes().get(self.pos.idx).map(|b| *b)
@@ -189,7 +200,7 @@ impl<'src> Iterator for Tokenizer<'src> {
                         let mut current_line = None::<String>;
 
                         // call on the character after a line to push the previous line onto the lines list
-                        
+
                         macro_rules! push_last_line {
                             {} => {
                                 let line_tail = &self.source[string_start..self.pos.idx];
@@ -217,7 +228,10 @@ impl<'src> Iterator for Tokenizer<'src> {
                             match byte {
                                 b'"' => {
                                     if let Some(potential_str) = self.peek_bytes(4) {
-                                        if &potential_str[1..3] == br#"""""# {
+                                        let triple_quote = potential_str[1] == b'"'
+                                            && potential_str[2] == b'"'
+                                            && potential_str[3] == b'"';
+                                        if triple_quote {
                                             if potential_str[0] == b'\\' {
                                                 // escaped triple quote
 
@@ -230,8 +244,9 @@ impl<'src> Iterator for Tokenizer<'src> {
 
                                                 self.pos.idx += 2; // skip an extra 2 bytes, from <*>""" to *"<">"
 
-                                                string_start = self.pos.idx + 1;
+                                                string_start = self.pos.idx + 2;
                                             } else {
+                                                self.pos.idx += 1;
                                                 push_last_line!();
                                                 // ending triple quote
                                                 break;
@@ -272,12 +287,8 @@ impl<'src> Iterator for Tokenizer<'src> {
                     if let Some(common_ident) = common_ident {
                         for line in lines.iter_mut().skip(1) {
                             *line = match line {
-                                Cow::Borrowed(line) => {
-                                    Cow::Borrowed(&line[common_ident..])
-                                }
-                                Cow::Owned(line) => {
-                                    Cow::Owned(line[common_ident..].to_owned())
-                                }
+                                Cow::Borrowed(line) => Cow::Borrowed(&line[common_ident..]),
+                                Cow::Owned(line) => Cow::Owned(line[common_ident..].to_owned()),
                             }
                         }
                     }
@@ -319,7 +330,7 @@ impl<'src> Iterator for Tokenizer<'src> {
 
                     let mut line = None;
 
-                    let mut str_pos = self.pos.idx;
+                    let mut str_pos = self.pos.idx + 1;
 
                     loop {
                         self.pos.idx += 1;
@@ -340,11 +351,11 @@ impl<'src> Iterator for Tokenizer<'src> {
                             b'\\' => {
                                 // escape
 
-                                // from <\>n to \<n>
-                                self.pos.idx += 1;
-
                                 let line = line.get_or_insert(String::new());
                                 line.push_str(&self.source[str_pos..self.pos.idx]);
+
+                                // from <\>n to \<n>
+                                self.pos.idx += 1;
 
                                 let byte = match self.peek_byte() {
                                     Some(byte) => byte,
@@ -449,7 +460,7 @@ impl<'src> Iterator for Tokenizer<'src> {
     }
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum TokenContent<'src> {
     Exclamation,
     DollarSign,
@@ -471,10 +482,155 @@ pub enum TokenContent<'src> {
     StringValue(Cow<'src, str>),
 }
 
-
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
     fn test() {
+        let mut tokenizer = Tokenizer::new("5");
+
+        let token = tokenizer.next().unwrap().unwrap();
+
+        assert_eq!(
+            token,
+            Token {
+                content: TokenContent::IntValue(5),
+                pos: Position {
+                    idx: 0,
+                    line_start_idx: 0,
+                    line: 1
+                }
+            }
+        )
+    }
+
+    #[test]
+    fn test_whitespace_remover() {
+        let mut tokenizer = Tokenizer::new(
+            "
+        6
         
+          $",
+        );
+
+        let token = tokenizer.next().unwrap().unwrap();
+
+        assert_eq!(
+            token,
+            Token {
+                content: TokenContent::IntValue(6),
+                pos: Position {
+                    idx: 9,
+                    line_start_idx: 1,
+                    line: 2
+                }
+            }
+        );
+
+        let token = tokenizer.next().unwrap().unwrap();
+
+        assert_eq!(token.pos.line(), 4);
+        assert_eq!(token.pos.column(), 11);
+    }
+
+    macro_rules! expect_tokens {
+        (
+            $source:literal
+
+            $(
+                $( @[$line:literal : $col:literal] )?
+
+                $content:expr
+            ),+
+        ) => {{
+            let mut tokenizer = Tokenizer::new($source);
+
+            $(
+                let token = tokenizer.next().unwrap().unwrap();
+                assert_eq!(
+                    token.content,
+                    $content
+                );
+
+                $(
+                    assert_eq!(token.pos.line(), $line);
+                    assert_eq!(token.pos.column(), $col);
+                )?
+            )+
+
+            if let Some(token) = tokenizer.next() { panic!("expected end of tokenizer, found: {:?}", token)}
+        }};
+    }
+
+    #[test]
+    fn test_simple_string() {
+        expect_tokens! {
+            r#" "test foobar" "test \" \\\n \u263A" aaaa   "#
+
+            TokenContent::StringValue(Cow::Borrowed("test foobar")),
+            TokenContent::StringValue(Cow::Borrowed("test \" \\\n ☺")),
+            TokenContent::Name("aaaa")
+        }
+    }
+
+    #[test]
+    fn test_block_string() {
+        expect_tokens! {
+            r#" """hello""" """
+             block
+            string
+            """ 
+
+            """
+            ""this works!""\n\n
+            """
+            
+            """
+            block string
+            with
+            escaped \""" quote
+            \"""""""#
+
+            TokenContent::StringValue(Cow::Borrowed("hello")),
+            TokenContent::StringValue(Cow::Borrowed(" block\nstring")),
+            TokenContent::StringValue(Cow::Borrowed("\"\"this works!\"\"\\n\\n")),
+            @[9:13] TokenContent::StringValue(Cow::Borrowed("block string\nwith\nescaped \"\"\" quote\n\"\"\""))
+        }
+    }
+
+    #[test]
+    fn test_block_string_rn() {
+        expect_tokens! {
+            " \"\"\"hello\r\n world\"\"\" "
+
+            TokenContent::StringValue(Cow::Borrowed("hello\nworld"))
+        }
+    }
+
+    #[test]
+    fn test_assortment() {
+        expect_tokens! {
+            " ! $ ( ) ... : = @ [ ] { } | _abc 12345 -17.0e3 \"hello\" \"hello\\n\" "
+
+            TokenContent::Exclamation,
+            TokenContent::DollarSign,
+            TokenContent::LeftParen,
+            TokenContent::RightParen,
+            TokenContent::Ellipses,
+            TokenContent::Colon,
+            TokenContent::Equals,
+            TokenContent::At,
+            TokenContent::LeftBracket,
+            TokenContent::RightBracket,
+            TokenContent::LeftCurlyBracket,
+            TokenContent::RightCurlyBracket,
+            TokenContent::Pipe,
+            TokenContent::Name("_abc"),
+            TokenContent::IntValue(12345),
+            TokenContent::FloatValue(-17.0e3),
+            TokenContent::StringValue(Cow::Borrowed("hello")),
+            TokenContent::StringValue(Cow::Borrowed("hello\n"))
+        }
     }
 }
