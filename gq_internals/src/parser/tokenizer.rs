@@ -18,6 +18,8 @@ macro_rules! punctuator {
 pub struct Tokenizer<'src> {
     source: &'src str,
     pos: Position,
+
+    peeked: Option<Result<Token<'src>, ParserError>>,
 }
 
 impl<'src> Tokenizer<'src> {
@@ -29,7 +31,21 @@ impl<'src> Tokenizer<'src> {
                 line: 1,
                 line_start_idx: 0,
             },
+            peeked: None
         }
+    }
+
+    #[inline]
+    pub const fn pos(&self) -> Position {
+        self.pos
+    }
+
+    pub fn peek_token(&mut self) -> Option<Result<&Token<'src>, ParserError>> {
+        self.peeked = self.next();
+        self.peeked.as_ref().map(|peeked| match peeked {
+            Ok(token) => Ok(token),
+            Err(err) => Err(err.clone()),
+        })
     }
 
     #[inline]
@@ -100,6 +116,10 @@ impl<'src> Iterator for Tokenizer<'src> {
     type Item = Result<Token<'src>, ParserError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(peeked) = self.peeked.take() {
+            return Some(peeked);
+        }
+
         self.skip_ignored();
 
         let byte = self.peek_byte()?;

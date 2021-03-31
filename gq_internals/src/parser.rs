@@ -1,4 +1,7 @@
 mod tokenizer;
+mod const_val;
+
+use thiserror::Error;
 
 #[derive(Debug, PartialEq)]
 pub struct Token<'src> {
@@ -25,21 +28,29 @@ impl Position {
 }
 
 
+impl std::fmt::Display for Position {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.line(), self.column())
+    }
+}
+
 impl std::fmt::Debug for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.line(), self.column())
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error, Clone)]
 pub enum ParserErrorKind {
+    #[error("Variable in const input")]
     VariableInConstInput,
-    UndefinedVariable,
-    VariableOutsideOperation,
+    #[error("Invalid {0}")]
     Invalid(&'static str),
+    #[error("Unexpected {0}")]
     Unexpected(&'static str),
+    #[error("Expected {0}")]
     Expected(&'static str),
-    Other(&'static str),
+    #[error("{0}")]
     Serde(String)
 }
 
@@ -51,10 +62,36 @@ impl ParserErrorKind {
             locations: vec![pos]
         }
     }
+    #[inline]
+    fn unknown_location(self) -> ParserError {
+        ParserError {
+            kind: self,
+            locations: vec![]
+        }
+    }
 }
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParserError {
     kind: ParserErrorKind,
     locations: Vec<Position>
+}
+
+impl std::fmt::Display for ParserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ParserError at [")?;
+        for loc in self.locations.iter() {
+            loc.fmt(f)?;
+            f.write_str("; ")?;
+        }
+        f.write_str("]: ")?;
+        self.kind.fmt(f)
+    }
+}
+
+impl std::error::Error for ParserError {}
+
+impl serde::de::Error for ParserError {
+    fn custom<T>(msg: T) -> Self where T: std::fmt::Display {
+        ParserError { kind: ParserErrorKind::Serde( msg.to_string() ), locations: vec![] }
+    }
 }
