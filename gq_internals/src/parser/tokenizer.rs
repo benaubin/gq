@@ -1,0 +1,480 @@
+use std::borrow::{Cow};
+
+use super::{ParserError, ParserErrorKind, Position, Token};
+
+macro_rules! punctuator {
+    [ ! ] => { TokenContent::Exclamation };
+    [ $ ] => { TokenContent::DollarSign };
+    ( () ) => { (TokenContent::LeftParen, TokenContent::RightParen) };
+    [ ... ] => { TokenContent::Ellipses };
+    [ : ] => { TokenContent::Colon };
+    [ = ] => { TokenContent::Equals };
+    [ @ ] => { TokenContent::At };
+    [ [] ] => { (TokenContent::LeftBracket, TokenContent::RightBracket) };
+    ( {} ) => { (TokenContent::LeftCurlyBracket, TokenContent::RightCurlyBracket) };
+    [ | ] => { TokenContent::Pipe };
+}
+
+pub struct Tokenizer<'src> {
+    source: &'src str,
+    pos: Position,
+}
+
+impl<'src> Tokenizer<'src> {
+    #[inline]
+    fn peek_byte(&self) -> Option<u8> {
+        self.source.as_bytes().get(self.pos.idx).map(|b| *b)
+    }
+
+    #[inline]
+    fn peek_next_byte(&self) -> Option<u8> {
+        self.source.as_bytes().get(self.pos.idx + 1).map(|b| *b)
+    }
+
+    #[inline]
+    fn peek_bytes(&self, len: usize) -> Option<&[u8]> {
+        self.source.as_bytes().get(self.pos.idx..)?.get(..len)
+    }
+
+    fn handle_line_terminator(&mut self) {
+        debug_assert!(matches!(self.peek_byte(), Some(b'\r') | Some(b'\n')));
+
+        // line terminator
+
+        // test for \r\n, which should be treated as a single line terminator
+        if let Some(b"\r\n") = self.peek_bytes(2) {
+            // skip an extra character, in order to treat the \r\n as a single line terminator
+            self.pos.idx += 1;
+        }
+
+        self.pos.line += 1;
+        self.pos.line_start_idx = self.pos.idx + 1;
+    }
+
+    fn skip_ignored(&mut self) {
+        loop {
+            const UNICODE_BOM: &[u8] = "\u{FEFF}".as_bytes();
+            const UNICODE_BOM_0: u8 = UNICODE_BOM[0];
+
+            let byte = match self.peek_byte() {
+                Some(b) => b,
+                None => return,
+            };
+
+            match byte {
+                UNICODE_BOM_0 if self.peek_bytes(UNICODE_BOM.len()) == Some(UNICODE_BOM) => {
+                    // unicode byte order mark, ignored
+                }
+                b'\t' | b' ' | b',' => { /* whitespace or ignored comma, ignored */ }
+                b'\r' | b'\n' => self.handle_line_terminator(),
+                b'#' => {
+                    // comment
+                    // skip characters until newline
+                    while !matches!(
+                        self.source.as_bytes().get(self.pos.idx + 1),
+                        None | Some(b'\r') | Some(b'\n')
+                    ) {
+                        self.pos.idx += 1;
+                    }
+                }
+                _ => return,
+            }
+
+            self.pos.idx += 1;
+        }
+    }
+}
+
+impl<'src> Iterator for Tokenizer<'src> {
+    type Item = Result<Token<'src>, ParserError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.skip_ignored();
+
+        let byte = self.peek_byte()?;
+
+        let start_pos = self.pos;
+
+        let token = match byte {
+            b'!' => punctuator![!],
+            b'$' => punctuator! [ $ ],
+            b'(' => punctuator![()].0,
+            b')' => punctuator![()].1,
+            b'.' if self.peek_bytes(3) == Some(b"...") => {
+                self.pos.idx += 2; // shift two extra positions
+                punctuator! [ ... ]
+            }
+            b':' => punctuator! [ : ],
+            b'=' => punctuator! [ = ],
+            b'@' => punctuator! [ @ ],
+            b'[' => punctuator![[]].0,
+            b']' => punctuator![[]].1,
+            b'{' => punctuator![{}].0,
+            b'}' => punctuator![{}].1,
+            b'|' => punctuator! [ | ],
+            b'A'..=b'Z' | b'a'..=b'z' | b'_' => {
+                // name
+
+                while matches!(
+                    self.peek_next_byte(),
+                    Some(b'A'..=b'Z') | Some(b'0'..=b'9') | Some(b'a'..=b'z') | Some(b'_')
+                ) {
+                    self.pos.idx += 1;
+                }
+
+                TokenContent::Name(&self.source[start_pos.idx..=self.pos.idx])
+            }
+            b'-' | b'0'..=b'9' => {
+                while matches!(self.peek_next_byte(), Some(b'0'..=b'9')) {
+                    self.pos.idx += 1;
+                }
+
+                // track if we have a float to determine parsing strategy
+                let mut is_float = false;
+
+                // parse fractional part
+                if matches!(self.peek_next_byte(), Some(b'.')) {
+                    self.pos.idx += 1;
+
+                    while matches!(self.peek_next_byte(), Some(b'0'..=b'9')) {
+                        self.pos.idx += 1;
+                    }
+
+                    is_float = true;
+                }
+
+                // parse exponent part
+                if matches!(self.peek_next_byte(), Some(b'E') | Some(b'e')) {
+                    self.pos.idx += 1;
+
+                    if matches!(self.peek_next_byte(), Some(b'+') | Some(b'-')) {
+                        self.pos.idx += 1;
+                    }
+
+                    while matches!(self.peek_next_byte(), Some(b'0'..=b'9')) {
+                        self.pos.idx += 1;
+                    }
+
+                    is_float = true;
+                }
+
+                let num = &self.source[start_pos.idx..=self.pos.idx];
+
+                if is_float {
+                    match num.parse::<f32>() {
+                        Ok(num) => TokenContent::FloatValue(num),
+                        Err(_) => {
+                            return Some(Err(ParserErrorKind::Invalid("float").at(start_pos)))
+                        }
+                    }
+                } else {
+                    match num.parse::<i32>() {
+                        Ok(num) => TokenContent::IntValue(num),
+                        Err(_) => return Some(Err(ParserErrorKind::Invalid("int").at(start_pos))),
+                    }
+                }
+            }
+            b'"' => {
+                if self.peek_bytes(3) == Some(br#"""""#) {
+                    // block string
+
+                    // move position forward from <">"" to ""<">
+                    self.pos.idx += 2;
+
+                    let mut lines: Vec<Cow<'src, str>> = Vec::new();
+
+                    {
+                        // collect lines
+                        let mut string_start = self.pos.idx + 1;
+                        let mut current_line = None::<String>;
+
+                        // call on the character after a line to push the previous line onto the lines list
+                        
+                        macro_rules! push_last_line {
+                            {} => {
+                                let line_tail = &self.source[string_start..self.pos.idx];
+                                let line = match current_line.take() {
+                                    Some(mut line) => {
+                                        line.push_str(line_tail);
+                                        Cow::Owned(line)
+                                    }
+                                    None => Cow::Borrowed(line_tail),
+                                };
+                                lines.push(line);
+                            }
+                        }
+
+                        loop {
+                            let byte = match self.peek_next_byte() {
+                                Some(byte) => byte,
+                                None => {
+                                    return Some(Err(
+                                        ParserErrorKind::Unexpected("EOF").at(self.pos)
+                                    ))
+                                }
+                            };
+
+                            match byte {
+                                b'"' => {
+                                    if let Some(potential_str) = self.peek_bytes(4) {
+                                        if &potential_str[1..3] == br#"""""# {
+                                            if potential_str[0] == b'\\' {
+                                                // escaped triple quote
+
+                                                let str = current_line.get_or_insert(String::new());
+
+                                                str.push_str(
+                                                    &self.source[string_start..self.pos.idx],
+                                                );
+                                                str.push_str(r#"""""#);
+
+                                                self.pos.idx += 2; // skip an extra 2 bytes, from <*>""" to *"<">"
+
+                                                string_start = self.pos.idx + 1;
+                                            } else {
+                                                push_last_line!();
+                                                // ending triple quote
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    self.pos.idx += 1; // from <*>" to *<">
+                                }
+                                b'\r' | b'\n' => {
+                                    self.pos.idx += 1; // from <*>\n to *<\n>
+
+                                    push_last_line!();
+
+                                    self.handle_line_terminator();
+
+                                    string_start = self.pos.idx + 1;
+                                }
+                                _ => {
+                                    self.pos.idx += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    // find the min whitespace of all lines except the first
+                    let common_ident = lines
+                        .iter()
+                        .skip(1)
+                        .map(|line| {
+                            // count whitespace
+                            line.bytes()
+                                .take_while(|b| matches!(b, b'\t' | b' '))
+                                .count()
+                        })
+                        .min();
+
+                    // remove the common whitespace from all lines except the first
+                    if let Some(common_ident) = common_ident {
+                        for line in lines.iter_mut().skip(1) {
+                            *line = match line {
+                                Cow::Borrowed(line) => {
+                                    Cow::Borrowed(&line[common_ident..])
+                                }
+                                Cow::Owned(line) => {
+                                    Cow::Owned(line[common_ident..].to_owned())
+                                }
+                            }
+                        }
+                    }
+
+                    fn just_whitespace(line: &str) -> bool {
+                        line.bytes().all(|b| matches!(b, b'\t' | b' '))
+                    }
+
+                    // remove lines from back which are only white space
+                    while lines
+                        .last()
+                        .map(|line| just_whitespace(line))
+                        .unwrap_or(false)
+                    {
+                        lines.pop();
+                    }
+
+                    let lines = lines.into_iter();
+
+                    // remove lines upfront which are just whitespace
+                    let lines =
+                        lines.skip_while(|line| line.bytes().all(|b| matches!(b, b'\t' | b' ')));
+
+                    // concatenate the lines, trimming whitespace
+                    let formatted = lines
+                        .reduce(|mut out, line| {
+                            out.to_mut().push_str("\n");
+                            out.to_mut().push_str(&*line);
+                            out
+                        })
+                        .unwrap_or_default();
+
+                    // move past the ending triple quote, from <">"" to ""<">
+                    self.pos.idx += 3;
+
+                    TokenContent::StringValue(formatted)
+                } else {
+                    // regular string
+
+                    let mut line = None;
+
+                    let mut str_pos = self.pos.idx;
+
+                    loop {
+                        self.pos.idx += 1;
+
+                        let byte = match self.peek_byte() {
+                            Some(byte) => byte,
+                            None => {
+                                return Some(Err(ParserErrorKind::Unexpected("EOF").at(self.pos)))
+                            }
+                        };
+
+                        match byte {
+                            b'\n' | b'\t' => {
+                                return Some(Err(
+                                    ParserErrorKind::Unexpected("newline").at(self.pos)
+                                ))
+                            }
+                            b'\\' => {
+                                // escape
+
+                                // from <\>n to \<n>
+                                self.pos.idx += 1;
+
+                                let line = line.get_or_insert(String::new());
+                                line.push_str(&self.source[str_pos..self.pos.idx]);
+
+                                let byte = match self.peek_byte() {
+                                    Some(byte) => byte,
+                                    None => {
+                                        return Some(Err(
+                                            ParserErrorKind::Unexpected("EOF").at(self.pos)
+                                        ))
+                                    }
+                                };
+
+                                match byte {
+                                    b'"' => {
+                                        line.push('"');
+                                    }
+                                    b'/' => {
+                                        line.push('/');
+                                    }
+                                    b'\\' => {
+                                        line.push('\\');
+                                    }
+                                    b'b' => {
+                                        line.push('\u{0008}');
+                                    }
+                                    b'f' => {
+                                        line.push('\u{000C}');
+                                    }
+                                    b'n' => {
+                                        line.push('\n');
+                                    }
+                                    b'r' => {
+                                        line.push('\r');
+                                    }
+                                    b't' => {
+                                        line.push('\r');
+                                    }
+                                    b'u' => {
+                                        // unicode codepoint
+
+                                        // from \<u>DDDD to \u<D>DDD
+                                        self.pos.idx += 1;
+
+                                        let codepoint = self
+                                            .peek_bytes(4)
+                                            .and_then(|codepoint| {
+                                                std::str::from_utf8(codepoint).ok()
+                                            })
+                                            .and_then(|codepoint| {
+                                                u32::from_str_radix(codepoint, 16).ok()
+                                            })
+                                            .and_then(|codepoint| std::char::from_u32(codepoint));
+
+                                        match codepoint {
+                                            Some(codepoint) => line.push(codepoint),
+                                            None => {
+                                                return Some(Err(ParserErrorKind::Invalid(
+                                                    "Unicode escape",
+                                                )
+                                                .at(self.pos)))
+                                            }
+                                        }
+
+                                        // from \u<D>DDD to \uDDD<D>
+                                        self.pos.idx += 3;
+                                    }
+                                    _ => {
+                                        return Some(Err(ParserErrorKind::Unexpected(
+                                            "Invalid escape code",
+                                        )
+                                        .at(self.pos)))
+                                    }
+                                }
+
+                                str_pos = self.pos.idx + 1;
+                            }
+                            b'"' => break, // end of string
+                            _ => {}
+                        }
+                    }
+
+                    let val = &self.source[str_pos..self.pos.idx];
+
+                    let val = match line {
+                        Some(mut line) => {
+                            line.push_str(val);
+                            Cow::Owned(line)
+                        }
+                        None => Cow::Borrowed(val),
+                    };
+
+                    TokenContent::StringValue(val)
+                }
+            }
+            _ => return Some(Err(ParserErrorKind::Invalid("character").at(start_pos))),
+        };
+
+        self.pos.idx += 1;
+
+        Some(Ok(Token {
+            content: token,
+            pos: start_pos,
+        }))
+    }
+}
+
+#[derive(PartialEq, Clone)]
+pub enum TokenContent<'src> {
+    Exclamation,
+    DollarSign,
+    LeftParen,
+    RightParen,
+    Ellipses,
+    Colon,
+    Equals,
+    At,
+    LeftBracket,
+    RightBracket,
+    LeftCurlyBracket,
+    Pipe,
+    RightCurlyBracket,
+    /// /[_A-Za-z][_0-9A-Za-z]*/
+    Name(&'src str),
+    IntValue(i32),
+    FloatValue(f32),
+    StringValue(Cow<'src, str>),
+}
+
+
+#[cfg(test)]
+mod tests {
+    fn test() {
+        
+    }
+}
