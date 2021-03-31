@@ -224,4 +224,25 @@ mod tests {
 
         assert_eq!(token.content, TokenContent::Name("after_object"))
     }
+
+    #[test]
+    fn var() {
+        let mut tokenizer = Tokenizer::new(r#"
+            {
+                foobar: $yay
+            }
+
+            after_object
+        "#);
+
+        #[derive(Deserialize, Debug, PartialEq)]
+        struct Test {
+            foobar: i32
+        }
+
+        let test: Result<Test, _> = Deserialize::deserialize(&mut tokenizer);
+        let err = test.unwrap_err();
+
+        assert_eq! ( err.kind, ParserErrorKind::VariableInConstInput );
+    }
 }

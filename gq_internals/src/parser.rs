@@ -3,7 +3,7 @@ mod const_val;
 
 use thiserror::Error;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Token<'src> {
     content: tokenizer::TokenContent<'src>,
     pos: Position,
@@ -40,7 +40,7 @@ impl std::fmt::Debug for Position {
     }
 }
 
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ParserErrorKind {
     #[error("Variable in const input")]
     VariableInConstInput,

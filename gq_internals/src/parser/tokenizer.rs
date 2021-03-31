@@ -15,10 +15,10 @@ macro_rules! punctuator {
     [ | ] => { TokenContent::Pipe };
 }
 
+#[derive(Clone)]
 pub struct Tokenizer<'src> {
     source: &'src str,
     pos: Position,
-
     peeked: Option<Result<Token<'src>, ParserError>>,
 }
 
