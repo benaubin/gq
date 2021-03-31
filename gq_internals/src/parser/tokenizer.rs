@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn test_assortment() {
         expect_tokens! {
-            " ! $ ( ) ... : = @ [ ] { } | _abc 12345 -17.0e3 \"hello\" \"hello\\n\" "
+            " ! $ ( ) ... : = \r @, [ ] { } | _abc 12345 -17.0e3 \"hello\" \"hello\\n\" \n # comment \r\n $"
 
             TokenContent::Exclamation,
             TokenContent::DollarSign,
@@ -620,7 +620,7 @@ mod tests {
             TokenContent::Ellipses,
             TokenContent::Colon,
             TokenContent::Equals,
-            TokenContent::At,
+            @[2:2] TokenContent::At,
             TokenContent::LeftBracket,
             TokenContent::RightBracket,
             TokenContent::LeftCurlyBracket,
@@ -630,7 +630,8 @@ mod tests {
             TokenContent::IntValue(12345),
             TokenContent::FloatValue(-17.0e3),
             TokenContent::StringValue(Cow::Borrowed("hello")),
-            TokenContent::StringValue(Cow::Borrowed("hello\n"))
+            TokenContent::StringValue(Cow::Borrowed("hello\n")),
+            @[4:2] TokenContent::DollarSign
         }
     }
 }
