@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use super::{ParserError, ParserErrorKind, Position, Token};
+use super::{ParserError, ParserErrorKind, Token, Location};
+
+use serde::{Serialize, Deserialize};
 
 macro_rules! punctuator {
     [ ! ] => { TokenContent::Exclamation };
@@ -18,26 +20,33 @@ macro_rules! punctuator {
 #[derive(Clone)]
 pub struct Tokenizer<'src> {
     source: &'src str,
-    pos: Position,
     peeked: Option<Result<Token<'src>, ParserError>>,
+
+    /// The index of the next character
+    idx: usize,
+    /// The current line (new line characters are considered part of the prior line)
+    line: usize,
+    /// The byte position after the last encountered new line character (may be past the end of the source)
+    line_start_idx: usize,
 }
 
 impl<'src> Tokenizer<'src> {
     pub fn new(source: &'src str) -> Self {
         Tokenizer {
             source,
-            pos: Position {
-                idx: 0,
-                line: 1,
-                line_start_idx: 0,
-            },
+            idx: 0,
+            line: 1,
+            line_start_idx: 0,
             peeked: None
         }
     }
 
     #[inline]
-    pub const fn pos(&self) -> Position {
-        self.pos
+    pub const fn location(&self) -> Location {
+        Location {
+            line: self.line,
+            column: self.idx.saturating_sub(self.line_start_idx) + 1
+        }
     }
 
     pub fn peek_token(&mut self) -> Option<Result<&Token<'src>, ParserError>> {
@@ -50,17 +59,17 @@ impl<'src> Tokenizer<'src> {
 
     #[inline]
     fn peek_byte(&self) -> Option<u8> {
-        self.source.as_bytes().get(self.pos.idx).map(|b| *b)
+        self.source.as_bytes().get(self.idx).map(|b| *b)
     }
 
     #[inline]
     fn peek_next_byte(&self) -> Option<u8> {
-        self.source.as_bytes().get(self.pos.idx + 1).map(|b| *b)
+        self.source.as_bytes().get(self.idx + 1).map(|b| *b)
     }
 
     #[inline]
     fn peek_bytes(&self, len: usize) -> Option<&[u8]> {
-        self.source.as_bytes().get(self.pos.idx..)?.get(..len)
+        self.source.as_bytes().get(self.idx..)?.get(..len)
     }
 
     fn handle_line_terminator(&mut self) {
@@ -71,11 +80,11 @@ impl<'src> Tokenizer<'src> {
         // test for \r\n, which should be treated as a single line terminator
         if let Some(b"\r\n") = self.peek_bytes(2) {
             // skip an extra character, in order to treat the \r\n as a single line terminator
-            self.pos.idx += 1;
+            self.idx += 1;
         }
 
-        self.pos.line += 1;
-        self.pos.line_start_idx = self.pos.idx + 1;
+        self.line += 1;
+        self.line_start_idx = self.idx + 1;
     }
 
     fn skip_ignored(&mut self) {
@@ -98,16 +107,16 @@ impl<'src> Tokenizer<'src> {
                     // comment
                     // skip characters until newline
                     while !matches!(
-                        self.source.as_bytes().get(self.pos.idx + 1),
+                        self.source.as_bytes().get(self.idx + 1),
                         None | Some(b'\r') | Some(b'\n')
                     ) {
-                        self.pos.idx += 1;
+                        self.idx += 1;
                     }
                 }
                 _ => return,
             }
 
-            self.pos.idx += 1;
+            self.idx += 1;
         }
     }
 }
@@ -124,7 +133,8 @@ impl<'src> Iterator for Tokenizer<'src> {
 
         let byte = self.peek_byte()?;
 
-        let start_pos = self.pos;
+        let start_idx = self.idx;
+        let location = self.location();
 
         let token = match byte {
             b'!' => punctuator![!],
@@ -132,7 +142,7 @@ impl<'src> Iterator for Tokenizer<'src> {
             b'(' => punctuator![()].0,
             b')' => punctuator![()].1,
             b'.' if self.peek_bytes(3) == Some(b"...") => {
-                self.pos.idx += 2; // shift two extra positions
+                self.idx += 2; // shift two extra positions
                 punctuator! [ ... ]
             }
             b':' => punctuator! [ : ],
@@ -150,14 +160,14 @@ impl<'src> Iterator for Tokenizer<'src> {
                     self.peek_next_byte(),
                     Some(b'A'..=b'Z') | Some(b'0'..=b'9') | Some(b'a'..=b'z') | Some(b'_')
                 ) {
-                    self.pos.idx += 1;
+                    self.idx += 1;
                 }
 
-                TokenContent::Name(&self.source[start_pos.idx..=self.pos.idx])
+                TokenContent::Name(&self.source[start_idx..=self.idx])
             }
             b'-' | b'0'..=b'9' => {
                 while matches!(self.peek_next_byte(), Some(b'0'..=b'9')) {
-                    self.pos.idx += 1;
+                    self.idx += 1;
                 }
 
                 // track if we have a float to determine parsing strategy
@@ -165,10 +175,10 @@ impl<'src> Iterator for Tokenizer<'src> {
 
                 // parse fractional part
                 if matches!(self.peek_next_byte(), Some(b'.')) {
-                    self.pos.idx += 1;
+                    self.idx += 1;
 
                     while matches!(self.peek_next_byte(), Some(b'0'..=b'9')) {
-                        self.pos.idx += 1;
+                        self.idx += 1;
                     }
 
                     is_float = true;
@@ -176,32 +186,32 @@ impl<'src> Iterator for Tokenizer<'src> {
 
                 // parse exponent part
                 if matches!(self.peek_next_byte(), Some(b'E') | Some(b'e')) {
-                    self.pos.idx += 1;
+                    self.idx += 1;
 
                     if matches!(self.peek_next_byte(), Some(b'+') | Some(b'-')) {
-                        self.pos.idx += 1;
+                        self.idx += 1;
                     }
 
                     while matches!(self.peek_next_byte(), Some(b'0'..=b'9')) {
-                        self.pos.idx += 1;
+                        self.idx += 1;
                     }
 
                     is_float = true;
                 }
 
-                let num = &self.source[start_pos.idx..=self.pos.idx];
+                let num = &self.source[start_idx..=self.idx];
 
                 if is_float {
                     match num.parse::<f32>() {
                         Ok(num) => TokenContent::FloatValue(num),
                         Err(_) => {
-                            return Some(Err(ParserErrorKind::Invalid("float").at(start_pos)))
+                            return Some(Err(ParserErrorKind::Invalid("float").at(location)))
                         }
                     }
                 } else {
                     match num.parse::<i32>() {
                         Ok(num) => TokenContent::IntValue(num),
-                        Err(_) => return Some(Err(ParserErrorKind::Invalid("int").at(start_pos))),
+                        Err(_) => return Some(Err(ParserErrorKind::Invalid("int").at(location))),
                     }
                 }
             }
@@ -210,20 +220,20 @@ impl<'src> Iterator for Tokenizer<'src> {
                     // block string
 
                     // move position forward from <">"" to ""<">
-                    self.pos.idx += 2;
+                    self.idx += 2;
 
                     let mut lines: Vec<Cow<'src, str>> = Vec::new();
 
                     {
                         // collect lines
-                        let mut string_start = self.pos.idx + 1;
+                        let mut string_start = self.idx + 1;
                         let mut current_line = None::<String>;
 
                         // call on the character after a line to push the previous line onto the lines list
 
                         macro_rules! push_last_line {
                             {} => {
-                                let line_tail = &self.source[string_start..self.pos.idx];
+                                let line_tail = &self.source[string_start..self.idx];
                                 let line = match current_line.take() {
                                     Some(mut line) => {
                                         line.push_str(line_tail);
@@ -240,7 +250,7 @@ impl<'src> Iterator for Tokenizer<'src> {
                                 Some(byte) => byte,
                                 None => {
                                     return Some(Err(
-                                        ParserErrorKind::Unexpected("EOF").at(self.pos)
+                                        ParserErrorKind::Unexpected("EOF").at(self.location())
                                     ))
                                 }
                             };
@@ -258,34 +268,34 @@ impl<'src> Iterator for Tokenizer<'src> {
                                                 let str = current_line.get_or_insert(String::new());
 
                                                 str.push_str(
-                                                    &self.source[string_start..self.pos.idx],
+                                                    &self.source[string_start..self.idx],
                                                 );
                                                 str.push_str(r#"""""#);
 
-                                                self.pos.idx += 2; // skip an extra 2 bytes, from <*>""" to *"<">"
+                                                self.idx += 2; // skip an extra 2 bytes, from <*>""" to *"<">"
 
-                                                string_start = self.pos.idx + 2;
+                                                string_start = self.idx + 2;
                                             } else {
-                                                self.pos.idx += 1;
+                                                self.idx += 1;
                                                 push_last_line!();
                                                 // ending triple quote
                                                 break;
                                             }
                                         }
                                     }
-                                    self.pos.idx += 1; // from <*>" to *<">
+                                    self.idx += 1; // from <*>" to *<">
                                 }
                                 b'\r' | b'\n' => {
-                                    self.pos.idx += 1; // from <*>\n to *<\n>
+                                    self.idx += 1; // from <*>\n to *<\n>
 
                                     push_last_line!();
 
                                     self.handle_line_terminator();
 
-                                    string_start = self.pos.idx + 1;
+                                    string_start = self.idx + 1;
                                 }
                                 _ => {
-                                    self.pos.idx += 1;
+                                    self.idx += 1;
                                 }
                             }
                         }
@@ -342,7 +352,7 @@ impl<'src> Iterator for Tokenizer<'src> {
                         .unwrap_or_default();
 
                     // move past the ending triple quote, from <">"" to ""<">
-                    self.pos.idx += 3;
+                    self.idx += 3;
 
                     TokenContent::StringValue(formatted)
                 } else {
@@ -350,38 +360,38 @@ impl<'src> Iterator for Tokenizer<'src> {
 
                     let mut line = None;
 
-                    let mut str_pos = self.pos.idx + 1;
+                    let mut str_pos = self.idx + 1;
 
                     loop {
-                        self.pos.idx += 1;
+                        self.idx += 1;
 
                         let byte = match self.peek_byte() {
                             Some(byte) => byte,
                             None => {
-                                return Some(Err(ParserErrorKind::Unexpected("EOF").at(self.pos)))
+                                return Some(Err(ParserErrorKind::Unexpected("EOF").at(location)))
                             }
                         };
 
                         match byte {
                             b'\n' | b'\t' => {
                                 return Some(Err(
-                                    ParserErrorKind::Unexpected("newline").at(self.pos)
+                                    ParserErrorKind::Unexpected("newline").at(location)
                                 ))
                             }
                             b'\\' => {
                                 // escape
 
                                 let line = line.get_or_insert(String::new());
-                                line.push_str(&self.source[str_pos..self.pos.idx]);
+                                line.push_str(&self.source[str_pos..self.idx]);
 
                                 // from <\>n to \<n>
-                                self.pos.idx += 1;
+                                self.idx += 1;
 
                                 let byte = match self.peek_byte() {
                                     Some(byte) => byte,
                                     None => {
                                         return Some(Err(
-                                            ParserErrorKind::Unexpected("EOF").at(self.pos)
+                                            ParserErrorKind::Unexpected("EOF").at(self.location())
                                         ))
                                     }
                                 };
@@ -415,7 +425,7 @@ impl<'src> Iterator for Tokenizer<'src> {
                                         // unicode codepoint
 
                                         // from \<u>DDDD to \u<D>DDD
-                                        self.pos.idx += 1;
+                                        self.idx += 1;
 
                                         let codepoint = self
                                             .peek_bytes(4)
@@ -433,29 +443,29 @@ impl<'src> Iterator for Tokenizer<'src> {
                                                 return Some(Err(ParserErrorKind::Invalid(
                                                     "Unicode escape",
                                                 )
-                                                .at(self.pos)))
+                                                .at(self.location())))
                                             }
                                         }
 
                                         // from \u<D>DDD to \uDDD<D>
-                                        self.pos.idx += 3;
+                                        self.idx += 3;
                                     }
                                     _ => {
                                         return Some(Err(ParserErrorKind::Unexpected(
                                             "Invalid escape code",
                                         )
-                                        .at(self.pos)))
+                                        .at(self.location())))
                                     }
                                 }
 
-                                str_pos = self.pos.idx + 1;
+                                str_pos = self.idx + 1;
                             }
                             b'"' => break, // end of string
                             _ => {}
                         }
                     }
 
-                    let val = &self.source[str_pos..self.pos.idx];
+                    let val = &self.source[str_pos..self.idx];
 
                     let val = match line {
                         Some(mut line) => {
@@ -468,19 +478,19 @@ impl<'src> Iterator for Tokenizer<'src> {
                     TokenContent::StringValue(val)
                 }
             }
-            _ => return Some(Err(ParserErrorKind::Invalid("character").at(start_pos))),
+            _ => return Some(Err(ParserErrorKind::Invalid("character").at(location))),
         };
 
-        self.pos.idx += 1;
+        self.idx += 1;
 
         Some(Ok(Token {
             content: token,
-            pos: start_pos,
+            location,
         }))
     }
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub enum TokenContent<'src> {
     Exclamation,
     DollarSign,
@@ -516,10 +526,9 @@ mod tests {
             token,
             Token {
                 content: TokenContent::IntValue(5),
-                pos: Position {
-                    idx: 0,
-                    line_start_idx: 0,
-                    line: 1
+                location: Location {
+                    line: 1,
+                    column: 1
                 }
             }
         )
@@ -540,18 +549,17 @@ mod tests {
             token,
             Token {
                 content: TokenContent::IntValue(6),
-                pos: Position {
-                    idx: 9,
-                    line_start_idx: 1,
-                    line: 2
+                location: Location {
+                    line: 2,
+                    column: 9
                 }
             }
         );
 
         let token = tokenizer.next().unwrap().unwrap();
 
-        assert_eq!(token.pos.line(), 4);
-        assert_eq!(token.pos.column(), 11);
+        assert_eq!(token.location.line, 4);
+        assert_eq!(token.location.column, 11);
     }
 
     macro_rules! expect_tokens {
@@ -574,8 +582,10 @@ mod tests {
                 );
 
                 $(
-                    assert_eq!(token.pos.line(), $line);
-                    assert_eq!(token.pos.column(), $col);
+                    assert_eq!(token.location, Location {
+                        line: $line,
+                        column: $col
+                    });
                 )?
             )+
 

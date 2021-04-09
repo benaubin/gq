@@ -6,37 +6,26 @@ use thiserror::Error;
 #[derive(Debug, PartialEq, Clone)]
 pub struct Token<'src> {
     content: tokenizer::TokenContent<'src>,
-    pos: Position,
+    location: Location,
 }
 
-#[derive(PartialEq, Eq, Copy, Clone)]
-pub struct Position {
-    /// The index of the next character
-    idx: usize,
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Location {
     /// The current line (new line characters are considered part of the prior line)
-    line: usize,
-    /// The byte position after the last encountered new line character (may be past the end of the source)
-    line_start_idx: usize,
-}
-impl Position {
-    fn line(&self) -> usize {
-        self.line
-    }
-    fn column(&self) -> usize {
-        self.idx.saturating_sub(self.line_start_idx) + 1
-    }
+    pub line: usize,
+    /// Column
+    pub column: usize
 }
 
-
-impl std::fmt::Display for Position {
+impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.line(), self.column())
+        write!(f, "{}:{}", self.line, self.column)
     }
 }
 
-impl std::fmt::Debug for Position {
+impl std::fmt::Debug for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.line(), self.column())
+        write!(f, "{}:{}", self.line, self.column)
     }
 }
 
@@ -56,10 +45,10 @@ pub enum ParserErrorKind {
 
 impl ParserErrorKind {
     #[inline]
-    fn at(self, pos: Position) -> ParserError {
+    fn at(self, location: Location) -> ParserError {
         ParserError {
             kind: self,
-            locations: vec![pos]
+            locations: vec![location]
         }
     }
     #[inline]
@@ -73,7 +62,7 @@ impl ParserErrorKind {
 #[derive(Debug, Clone)]
 pub struct ParserError {
     kind: ParserErrorKind,
-    locations: Vec<Position>
+    locations: Vec<Location>
 }
 
 impl std::fmt::Display for ParserError {
